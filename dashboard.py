@@ -18,8 +18,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from query_engine import query_with_llm, keyword_parse, execute_query
-
 DATA_FILE = "gle_data.json"
 
 # ── page config ──────────────────────────────────────────────────────────────
@@ -76,6 +74,7 @@ clients_raw = data["clients"]
 staff_raw = data["staff"]
 expenses_raw = data.get("expenses", [])
 invoices_raw = data.get("invoices", [])
+tasks_raw = data.get("tasks", [])
 project_types = data.get("project_types", {})
 
 df_projects = pd.DataFrame(projects_raw)
@@ -83,6 +82,7 @@ df_clients = pd.DataFrame(clients_raw)
 df_staff = pd.DataFrame(staff_raw)
 df_expenses = pd.DataFrame(expenses_raw) if expenses_raw else pd.DataFrame()
 df_invoices = pd.DataFrame(invoices_raw) if invoices_raw else pd.DataFrame()
+df_tasks = pd.DataFrame(tasks_raw) if tasks_raw else pd.DataFrame()
 
 # Build list of project type names for filters
 type_names = sorted(set(df_projects["TypeName"].unique())) if "TypeName" in df_projects.columns else []
@@ -131,9 +131,9 @@ with st.sidebar:
             "Project Table",
             "Client Rollup",
             "Invoice Explorer",
+            "Service Items",
             "At-Risk Projects",
             "Report Builder",
-            "Ask a Question",
             "Staff Utilization",
         ],
         label_visibility="collapsed",
@@ -613,110 +613,134 @@ elif view == "Report Builder":
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# VIEW 7: Ask a Question (Natural Language Query)
+# VIEW 7: Service Items (Task-Level Profitability)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-elif view == "Ask a Question":
-    st.header("Ask a Question")
-    st.caption("Type a question in plain English and get a report back. Uses AI to interpret your request.")
+elif view == "Service Items":
+    st.header("Service Items")
+    st.caption("Revenue, cost, and profitability broken down by task/service item across all projects.")
 
-    # Example queries
-    with st.expander("Example questions you can ask"):
-        st.markdown("""
-- **Show me all GI CSA projects with their client name, hours, revenue, labor cost, and profit**
-- **Which projects have negative margin?**
-- **Show invoices sent in 2025 for Safety projects**
-- **Top 10 projects by revenue**
-- **Total invoiced by client in 2025**
-- **Unpaid invoices over 30 days outstanding**
-- **Construction Safety projects with revenue over $10,000**
-""")
+    if df_tasks.empty:
+        st.warning("No task data available. Refresh data to pull task details from BigTime.")
+    else:
+        # Filter tasks to match the project-level sidebar filters
+        filtered_project_ids = set(df_filtered["ProjectId"])
+        df_tasks_filt = df_tasks[df_tasks["ProjectId"].isin(filtered_project_ids)].copy()
 
-    question = st.text_area("Your question:", placeholder="e.g., Show me GI CSA projects with invoices sent in 2025...", height=80)
+        # Additional filters for this view
+        si_col1, si_col2 = st.columns(2)
+        with si_col1:
+            # Filter by project type
+            if type_names and "TypeName" in df_tasks_filt.columns:
+                si_types = st.multiselect("Project Type", type_names, default=[], key="si_types")
+                if si_types:
+                    df_tasks_filt = df_tasks_filt[df_tasks_filt["TypeName"].isin(si_types)]
+        with si_col2:
+            # Filter out zero-activity tasks
+            hide_zero = st.checkbox("Hide tasks with no hours and no revenue", value=True)
+            if hide_zero:
+                df_tasks_filt = df_tasks_filt[(df_tasks_filt["HrsIn"] > 0) | (df_tasks_filt["Revenue"] > 0)]
 
-    if st.button("Run Query", type="primary") and question.strip():
-        with st.spinner("Processing your question..."):
-            # Try LLM first, fall back to keyword parser
-            spec, error = query_with_llm(question, type_names)
-            used_ai = True
+        # KPIs
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Service Items", f"{len(df_tasks_filt):,}")
+        k2.metric("Total Hours", f"{df_tasks_filt['HrsIn'].sum():,.1f}")
+        k3.metric("Total Invoiced", f"${df_tasks_filt['Revenue'].sum():,.0f}")
+        k4.metric("Total Cost", f"${df_tasks_filt['TotalCost'].sum():,.0f}")
+        task_margin = df_tasks_filt["Revenue"].sum() - df_tasks_filt["TotalCost"].sum()
+        k5.metric("Total Margin", f"${task_margin:,.0f}")
 
-            if error:
-                # Fall back to keyword parser
-                st.info(f"AI query unavailable ({error.split('.')[0]}). Using keyword parser instead.")
-                spec = keyword_parse(question, type_names)
-                used_ai = False
+        st.divider()
 
-            if spec:
-                # Show the interpreted query
-                with st.expander("Query interpretation" + (" (AI)" if used_ai else " (keyword)")):
-                    st.json(spec)
+        # ── Tab 1: Summary by Service Item | Tab 2: Detail rows ──────────
+        tab1, tab2 = st.tabs(["Summary by Service Item", "Detail (all rows)"])
 
-                result_df, title, exec_error = execute_query(spec, df_projects, df_invoices)
+        with tab1:
+            # Group by TaskNm — aggregate hours, revenue, cost
+            task_agg = (
+                df_tasks_filt.groupby("TaskNm")
+                .agg(
+                    Projects=("ProjectId", "nunique"),
+                    HrsIn=("HrsIn", "sum"),
+                    Revenue=("Revenue", "sum"),
+                    LaborCost=("LaborCost", "sum"),
+                    ExpCost=("ExpCost", "sum"),
+                    TotalCost=("TotalCost", "sum"),
+                    Margin=("Margin", "sum"),
+                    WIP=("WIP", "sum"),
+                )
+                .reset_index()
+            )
+            task_agg["MarginPct"] = (
+                (task_agg["Margin"] / task_agg["Revenue"] * 100)
+                .fillna(0).round(1)
+            )
+            task_agg = task_agg.sort_values("Revenue", ascending=False)
 
-                if exec_error:
-                    st.error(f"Query execution error: {exec_error}")
-                elif result_df is not None and not result_df.empty:
-                    st.subheader(title)
-                    st.caption(f"{len(result_df)} rows")
-                    st.dataframe(
-                        result_df.style.format(auto_format(result_df)),
-                        use_container_width=True,
-                        height=min(600, max(200, len(result_df) * 35 + 50)),
-                    )
+            st.caption(f"{len(task_agg)} unique service items across {df_tasks_filt['ProjectId'].nunique()} projects")
 
-                    # Download
-                    csv = result_df.to_csv(index=False)
-                    st.download_button("Download CSV", csv, "query_result.csv", "text/csv")
-                else:
-                    st.warning("No results found matching your query.")
+            st.dataframe(
+                task_agg.style.format(auto_format(task_agg)).background_gradient(
+                    subset=["MarginPct"], cmap="RdYlGn", vmin=-50, vmax=50,
+                ),
+                use_container_width=True,
+                height=500,
+            )
 
-    # Quick presets
-    st.divider()
-    st.subheader("Quick Reports")
-    preset_col1, preset_col2, preset_col3 = st.columns(3)
+            csv = task_agg.to_csv(index=False)
+            st.download_button("Download Summary CSV", csv, "service_items_summary.csv", "text/csv")
 
-    presets = {
-        "GI CSA Profitability": {
-            "table": "projects",
-            "filters": [{"column": "TypeName", "op": "eq", "value": "GI CSA"}],
-            "columns": ["ClientNm", "ProjectNm", "HrsIn", "Revenue", "LaborCost", "ExpCost", "Margin", "MarginPct"],
-            "sort_by": "Revenue",
-            "sort_asc": False,
-            "title": "GI CSA Project Profitability",
-        },
-        "Unpaid Invoices": {
-            "table": "invoices",
-            "filters": [{"column": "IsPaid", "op": "eq", "value": False}, {"column": "TotalAmtDue", "op": "gt", "value": 0}],
-            "columns": ["InvoiceNbr", "InvoiceDt", "ClientNm", "DName", "InvoiceAmt", "PaidAmt", "TotalAmtDue", "DaysOutstanding", "ARPeriodNm"],
-            "sort_by": "TotalAmtDue",
-            "sort_asc": False,
-            "title": "Unpaid Invoices",
-        },
-        "2025 Invoices by Type": {
-            "table": "combined",
-            "filters": [{"column": "InvoiceDt", "op": "year", "value": 2025}],
-            "columns": ["TypeName", "InvoiceAmt"],
-            "group_by": "TypeName",
-            "agg": {"InvoiceAmt": "sum"},
-            "sort_by": "InvoiceAmt",
-            "sort_asc": False,
-            "title": "2025 Total Invoiced by Project Type",
-        },
-    }
+            # Chart: top service items by revenue
+            st.subheader("Top 15 Service Items by Revenue")
+            top_tasks = task_agg[task_agg["Revenue"] > 0].head(15)
+            if not top_tasks.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(name="Revenue", x=top_tasks["TaskNm"], y=top_tasks["Revenue"]))
+                fig.add_trace(go.Bar(name="Cost", x=top_tasks["TaskNm"], y=top_tasks["TotalCost"]))
+                fig.update_layout(barmode="group", height=420, margin=dict(t=10))
+                st.plotly_chart(fig, use_container_width=True)
 
-    for i, (name, spec) in enumerate(presets.items()):
-        col = [preset_col1, preset_col2, preset_col3][i % 3]
-        with col:
-            if st.button(name, key=f"preset_{i}"):
-                result_df, title, exec_error = execute_query(spec, df_projects, df_invoices)
-                if exec_error:
-                    st.error(exec_error)
-                elif result_df is not None and not result_df.empty:
-                    st.subheader(title)
-                    st.dataframe(
-                        result_df.style.format(auto_format(result_df)),
-                        use_container_width=True,
-                    )
+            # Chart: margin % by service item
+            st.subheader("Margin % by Service Item")
+            with_rev = task_agg[task_agg["Revenue"] > 500].copy()
+            if not with_rev.empty:
+                with_rev = with_rev.sort_values("MarginPct")
+                colors = ["#d62728" if v < 0 else "#2ca02c" for v in with_rev["MarginPct"]]
+                fig2 = go.Figure(go.Bar(
+                    x=with_rev["MarginPct"],
+                    y=with_rev["TaskNm"],
+                    orientation="h",
+                    marker_color=colors,
+                    text=[f"{v:.1f}%" for v in with_rev["MarginPct"]],
+                    textposition="outside",
+                ))
+                fig2.add_vline(x=0, line_dash="dash", line_color="gray")
+                fig2.update_layout(
+                    height=max(400, len(with_rev) * 28),
+                    margin=dict(t=10, l=250),
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+
+        with tab2:
+            # Full task-level detail table
+            detail_cols = [
+                "ClientNm", "ProjectNm", "TypeName", "TaskNm",
+                "HrsIn", "Revenue", "LaborCost", "ExpCost", "TotalCost", "Margin", "WIP",
+            ]
+            available = [c for c in detail_cols if c in df_tasks_filt.columns]
+            detail_df = df_tasks_filt[available].sort_values(
+                ["ClientNm", "ProjectNm", "TaskNm"]
+            )
+
+            st.caption(f"{len(detail_df)} task rows")
+            st.dataframe(
+                detail_df.style.format(auto_format(detail_df)),
+                use_container_width=True,
+                height=600,
+            )
+
+            csv2 = detail_df.to_csv(index=False)
+            st.download_button("Download Detail CSV", csv2, "service_items_detail.csv", "text/csv")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

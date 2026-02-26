@@ -91,6 +91,7 @@ def pull_data(include_inactive=False):
     # ── 5. Project profitability (task budget per project) ───────────────
     print(f"\nPulling task budgets for {len(projects)} projects...")
     project_results = []
+    task_results = []
     client_totals = defaultdict(lambda: {
         "ClientId": 0, "ClientNm": "",
         "Revenue": 0, "LaborCost": 0, "ExpCost": 0,
@@ -126,6 +127,33 @@ def pull_data(include_inactive=False):
 
         type_id = proj.get("TypeId", 0) or 0
         type_name = type_map.get(type_id, f"Unknown ({type_id})")
+
+        # Store individual task rows (service items)
+        for t in tasks:
+            t_revenue    = t.get("InvoicedToDate", 0) or 0
+            t_labor_cost = t.get("FeeCostIn", 0) or 0
+            t_exp_cost   = t.get("ExpCostIn", 0) or 0
+            t_total_cost = t_labor_cost + t_exp_cost
+            t_margin     = t_revenue - t_total_cost
+            task_results.append({
+                "ProjectId":    pid,
+                "ProjectNm":    proj.get("Nm", ""),
+                "ProjectCode":  proj.get("ProjectCode", ""),
+                "ClientNm":     client_nm,
+                "TypeName":     type_name,
+                "TaskNm":       t.get("TaskNm", ""),
+                "TaskGroup":    t.get("TaskGroup", ""),
+                "HrsIn":        t.get("HrsIn", 0) or 0,
+                "ChargeIn":     t.get("ChargeIn", 0) or 0,
+                "Revenue":      t_revenue,
+                "LaborCost":    t_labor_cost,
+                "ExpCost":      t_exp_cost,
+                "TotalCost":    t_total_cost,
+                "Margin":       t_margin,
+                "WIP":          (t.get("FeeWipToDate", 0) or 0) + (t.get("ExpWipToDate", 0) or 0),
+                "EstHrs":       t.get("EstHrs", 0) or 0,
+                "EstFee":       t.get("EstFee", 0) or 0,
+            })
 
         result = {
             "ProjectId":   pid,
@@ -193,9 +221,11 @@ def pull_data(include_inactive=False):
             "total_wip":          total_wip,
             "project_count":      len(project_results),
             "client_count":       len(client_totals),
+            "task_count":         len(task_results),
         },
         "project_types": type_map,
         "projects": project_results,
+        "tasks":    task_results,
         "clients":  list(client_totals.values()),
         "staff":    staff_list,
         "expenses": expenses,
@@ -207,6 +237,7 @@ def pull_data(include_inactive=False):
 
     print(f"\n{'='*55}")
     print(f"  Projects:  {len(project_results)}")
+    print(f"  Tasks:     {len(task_results)}")
     print(f"  Invoices:  {len(invoice_results)}")
     print(f"  Revenue:   ${total_revenue:,.0f}")
     print(f"  Cost:      ${total_cost:,.0f}")
