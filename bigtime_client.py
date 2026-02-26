@@ -7,13 +7,24 @@ Usage:
     projects = client.get_projects()
 """
 
-import os
 from pathlib import Path
 import time
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+# Load .env as a dict directly (avoids BOM / os.environ issues on Windows)
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+_cfg = dotenv_values(_ENV_PATH, encoding="utf-8-sig")
+
+
+def _req(key):
+    val = _cfg.get(key)
+    if not val:
+        raise RuntimeError(
+            f"{key} not found in {_ENV_PATH}. "
+            f"Keys present: {list(_cfg.keys())}"
+        )
+    return val
 
 
 class BigTimeClient:
@@ -23,12 +34,12 @@ class BigTimeClient:
     RATE_LIMIT_PAUSE = 3        # seconds to pause
 
     def __init__(self):
-        self.base_url = os.environ["BIGTIME_BASE_URL"]
+        self.base_url = _req("BIGTIME_BASE_URL")
         self.headers = {
             "Accept":          "application/json",
             "Content-Type":    "application/json",
-            "X-auth-ApiToken": os.environ["BIGTIME_API_TOKEN"],
-            "X-auth-realm":    os.environ["BIGTIME_FIRM_ID"],
+            "X-auth-ApiToken": _req("BIGTIME_API_TOKEN"),
+            "X-auth-realm":    _req("BIGTIME_FIRM_ID"),
         }
         self._call_count = 0
 
