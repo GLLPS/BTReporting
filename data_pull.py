@@ -32,7 +32,14 @@ def pull_data(include_inactive=False):
     projects = client.get_projects(active_only=not include_inactive)
     print(f"  {len(projects)} projects loaded")
 
-    # ── 2. Expenses (last 365 days) ──────────────────────────────────────
+    # ── 2. Project type picklist ───────────────────────────────────────────
+    print("Loading project types...")
+    type_list = client.get_project_types()
+    type_map = {int(t["Id"]): t["Name"] for t in type_list}
+    type_map[0] = "Unclassified"
+    print(f"  {len(type_list)} project types loaded: {list(type_map.values())}")
+
+    # ── 3. Expenses (last 365 days) ──────────────────────────────────────
     end_dt = datetime.now().strftime("%Y-%m-%d")
     start_dt = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 
@@ -45,7 +52,43 @@ def pull_data(include_inactive=False):
     for exp in expenses:
         expense_by_project[exp.get("ProjectSID", 0)].append(exp)
 
-    # ── 3. Project profitability (task budget per project) ───────────────
+    # ── 4. Invoice history (last 3 years) ─────────────────────────────────
+    inv_start = (datetime.now() - timedelta(days=1095)).strftime("%Y-%m-%d")
+    print("Loading invoice history...")
+    invoices = client.get_invoice_history(inv_start, end_dt)
+    print(f"  {len(invoices)} invoices loaded")
+
+    # Flatten invoices for storage (drop nested objects to keep JSON clean)
+    invoice_results = []
+    for inv in invoices:
+        invoice_results.append({
+            "InvoiceSid":    inv.get("Sid", 0),
+            "InvoiceNbr":    inv.get("InvoiceNbr", ""),
+            "InvoiceDt":     inv.get("InvoiceDt", ""),
+            "InvoiceDtSent": inv.get("InvoiceDtSent", ""),
+            "InvoiceDtDue":  inv.get("InvoiceDtDue", ""),
+            "InvoicePeriod": inv.get("InvoicePeriod", 0),
+            "ClientSid":     inv.get("ClientSid", 0),
+            "ClientNm":      inv.get("ClientNm", ""),
+            "ProjectSid":    inv.get("ProjectSid", 0),
+            "DName":         inv.get("DName", ""),
+            "InvoiceAmt":    inv.get("InvoiceAmt", 0),
+            "Subtotal":      inv.get("Subtotal", 0),
+            "SalesTaxAmt":   inv.get("SalesTaxAmt", 0),
+            "TotalAmt":      inv.get("TotalAmt", 0),
+            "PaidAmt":       inv.get("PaidAmt", 0),
+            "TotalAmtDue":   inv.get("TotalAmtDue", 0),
+            "IsPaid":        inv.get("IsPaid", False),
+            "Status":        inv.get("Status", 0),
+            "StatusTxt":     inv.get("StatusTxt", ""),
+            "PostedStatus":  inv.get("PostedStatus", ""),
+            "TermsNm":       inv.get("TermsNm", ""),
+            "PONumber":      inv.get("PONumber", ""),
+            "DaysOutstanding": inv.get("DaysOutstanding", 0),
+            "ARPeriodNm":    inv.get("ARPeriodNm", ""),
+        })
+
+    # ── 5. Project profitability (task budget per project) ───────────────
     print(f"\nPulling task budgets for {len(projects)} projects...")
     project_results = []
     client_totals = defaultdict(lambda: {
@@ -81,6 +124,9 @@ def pull_data(include_inactive=False):
         margin     = revenue - total_cost
         margin_pct = round(margin / revenue * 100, 1) if revenue > 0 else 0.0
 
+        type_id = proj.get("TypeId", 0) or 0
+        type_name = type_map.get(type_id, f"Unknown ({type_id})")
+
         result = {
             "ProjectId":   pid,
             "DisplayName": display,
@@ -88,6 +134,9 @@ def pull_data(include_inactive=False):
             "ProjectCode": proj.get("ProjectCode", ""),
             "ClientId":    proj.get("ClientId", 0),
             "ClientNm":    client_nm,
+            "TypeId":      type_id,
+            "TypeName":    type_name,
+            "BillingRate": proj.get("BillingRate", ""),
             "StartDt":     proj.get("StartDt", ""),
             "EndDt":       proj.get("EndDt", ""),
             "IsInactive":  proj.get("IsInactive", False),
@@ -127,7 +176,7 @@ def pull_data(include_inactive=False):
         ct["Margin"] = ct["Revenue"] - ct["TotalCost"]
         ct["MarginPct"] = round(ct["Margin"] / ct["Revenue"] * 100, 1) if ct["Revenue"] > 0 else 0.0
 
-    # ── 4. Summary ───────────────────────────────────────────────────────
+    # ── 6. Summary ───────────────────────────────────────────────────────
     total_revenue = sum(p["Revenue"] for p in project_results)
     total_cost    = sum(p["TotalCost"] for p in project_results)
     total_wip     = sum(p["WIP"] for p in project_results)
@@ -145,10 +194,12 @@ def pull_data(include_inactive=False):
             "project_count":      len(project_results),
             "client_count":       len(client_totals),
         },
+        "project_types": type_map,
         "projects": project_results,
         "clients":  list(client_totals.values()),
         "staff":    staff_list,
         "expenses": expenses,
+        "invoices": invoice_results,
     }
 
     with open("gle_data.json", "w") as f:
@@ -156,6 +207,7 @@ def pull_data(include_inactive=False):
 
     print(f"\n{'='*55}")
     print(f"  Projects:  {len(project_results)}")
+    print(f"  Invoices:  {len(invoice_results)}")
     print(f"  Revenue:   ${total_revenue:,.0f}")
     print(f"  Cost:      ${total_cost:,.0f}")
     print(f"  Margin:    ${total_margin:,.0f} ({overall_pct}%)")

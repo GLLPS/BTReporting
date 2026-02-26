@@ -105,3 +105,14 @@ class BigTimeClient:
             "maxdate": end_date,
             "view": "basic",
         }) or []
+
+    def get_invoice_history(self, start_date, end_date):
+        """Pull invoice history for a date range (YYYY-MM-DD strings)."""
+        return self.get("/invoice/history", {
+            "startDt": start_date,
+            "endDt": end_date,
+        }) or []
+
+    def get_project_types(self):
+        """Pull project type picklist (TypeId → name mapping)."""
+        return self.get("/picklist/FieldValues/LookupProjectType") or []
